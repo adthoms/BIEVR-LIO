@@ -1,0 +1,13 @@
+topics:
+  pointcloud: "/livox/lidar"
+  imu: "/livox/imu"
+
+calibration: # T_IMU_LIDAR (LiDAR -> IMU)
+  translation: [0.049258, -0.012500, 0.026946]
+  rotation: [0.999620,  0.027463,  0.002445,
+            -0.027517,  0.999299,  0.025398,
+            -0.001746, -0.025456,  0.999674]
+
+lidar:
+  min_range_m: 0.5 # Exclude points closer than this range [m]
+  max_range_m: 100 # Exclude points farther than this range [m]
