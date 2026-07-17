@@ -1,0 +1,13 @@
+topics:
+  pointcloud: "/falcon52/raw_velodyne_points"
+  imu: "/falcon52/ouster/imu"
+
+calibration: # T_IMU_LIDAR (LiDAR -> IMU)
+  translation: [0.000000, 0.000000, 0.000000]
+  rotation: [1.000000,  0.000000,  0.000000,
+             0.000000,  1.000000,  0.000000,
+             0.000000,  0.000000,  1.000000]
+
+lidar:
+  min_range_m: 0.5 # Exclude points closer than this range [m]
+  max_range_m: 100 # Exclude points farther than this range [m]
