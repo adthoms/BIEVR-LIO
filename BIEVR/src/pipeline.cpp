@@ -402,4 +402,17 @@ void Pipeline::logTUM(double timestamp, const Transform& pose) {
               << q.y() << " " << q.z() << " " << q.w() << "\n";
 }
 
+bool Pipeline::saveMapPCD(const std::string& path) const {
+  const std::vector<Eigen::Vector3f> points = map_->extractPoints();
+  if (points.empty()) {
+    LOG(W, "Map is empty, nothing to save to '" << path << "'.");
+    return false;
+  }
+  if (!writePCDBinary(path, points)) {
+    return false;
+  }
+  LOG(I, "Saved map (" << points.size() << " points) to '" << path << "'.");
+  return true;
+}
+
 }  // namespace bievr

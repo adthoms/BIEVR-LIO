@@ -30,6 +30,7 @@ class Pipeline {
     std::string map_frame = "map";
     std::string body_frame = "body";
     std::string log_path = "";
+    std::string map_path = "";
 
     size_t min_points_for_map_init = 100;
     size_t map_size_running_threshold = 5;
@@ -44,6 +45,8 @@ class Pipeline {
 
   void processFrame(const std::vector<ImuMeasurement>& imu_data,
                     const StampedIntensityPointcloud& pointcloud);
+
+  bool saveMapPCD(const std::string& path) const;
 
   template <typename T>
   void registerPublisher(std::function<void(const T&, const Header&, const std::string& topic,

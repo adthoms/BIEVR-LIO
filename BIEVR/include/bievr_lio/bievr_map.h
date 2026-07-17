@@ -51,6 +51,7 @@ class BIEVRMap {
   Eigen::Vector3i getVoxelIdx(const Point& point) const;
   const Voxel* getVoxel(const size_t hash_idx) const;
   bool nearestVoxel(const Point& point, size_t& result) const;
+  std::vector<Eigen::Vector3f> extractPoints() const;
 
   const double& voxel_size = config_.voxel_size;
   const double& pixel_size = config_.px_size;

@@ -419,6 +419,26 @@ Eigen::Vector3d BIEVRMap::getVoxelOrigin(const Eigen::Vector3d& point) const {
   return Eigen::Vector3d(hx * config_.voxel_size, hy * config_.voxel_size, hz * config_.voxel_size);
 }
 
+std::vector<Eigen::Vector3f> BIEVRMap::extractPoints() const {
+  std::vector<Eigen::Vector3f> points;
+  for (const auto& entry : map_) {
+    const Voxel& voxel = entry.second.voxel;
+    if (!voxel.observed_) continue;
+    // Inverse of the projection in integratePoints: pixel (row i, col j) with
+    // bump value h lifts to (j * px_size, i * px_size, h) in the image frame.
+    const Transform T_W_C = voxel.T_C_W_.inverse();
+    for (int i = 0; i < voxel.bump_smoothed_.rows(); ++i) {
+      for (int j = 0; j < voxel.bump_smoothed_.cols(); ++j) {
+        if (voxel.bump_weights_(i, j) <= 0.f) continue;
+        const Point p_W = T_W_C * Point(j * config_.px_size, i * config_.px_size,
+                                        voxel.bump_smoothed_(i, j));
+        points.emplace_back(p_W.cast<float>());
+      }
+    }
+  }
+  return points;
+}
+
 bool BIEVRMap::nearestVoxel(const Eigen::Vector3d& point, size_t& result) const {
   double min_dist = std::numeric_limits<double>::max();
   bool found = false;

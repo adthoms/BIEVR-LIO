@@ -61,6 +61,8 @@ float computeSigmaFromRadius(int radius);
 
 std::vector<Point> getNeighborOffsets(double voxel_size);
 
+bool writePCDBinary(const std::string& path, const std::vector<Eigen::Vector3f>& points);
+
 // State carried between frames by the live status dashboard: the pre-indented
 // ASCII art plus the accumulated trajectory length and the reference used to
 // integrate it and the elapsed time.

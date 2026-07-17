@@ -87,5 +87,10 @@ int main(int argc, char** argv) {
   bag.close();
   LOG(I, "Bag closed");
 
+  // Dump the final map when a target path is configured (debug.map_path).
+  if (!config.pipeline_config.map_path.empty()) {
+    pipeline->saveMapPCD(config.pipeline_config.map_path);
+  }
+
   return 0;
 }

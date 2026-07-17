@@ -2,9 +2,12 @@
 
 #include <cmath>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+
+#include "bievr_lio/log++.h"
 
 namespace bievr {
 
@@ -141,6 +144,32 @@ std::vector<Point> getNeighborOffsets(double voxel_size) {
     }
   }
   return offsets;
+}
+
+bool writePCDBinary(const std::string& path, const std::vector<Eigen::Vector3f>& points) {
+  // The vector's raw buffer is dumped as-is: three packed float32 per point.
+  static_assert(sizeof(Eigen::Vector3f) == 3 * sizeof(float));
+
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) {
+    LOG(E, "Could not open '" << path << "' for writing.");
+    return false;
+  }
+
+  file << "# .PCD v0.7 - Point Cloud Data file format\n"
+       << "VERSION 0.7\n"
+       << "FIELDS x y z\n"
+       << "SIZE 4 4 4\n"
+       << "TYPE F F F\n"
+       << "COUNT 1 1 1\n"
+       << "WIDTH " << points.size() << "\n"
+       << "HEIGHT 1\n"
+       << "VIEWPOINT 0 0 0 1 0 0 0\n"
+       << "POINTS " << points.size() << "\n"
+       << "DATA binary\n";
+  file.write(reinterpret_cast<const char*>(points.data()),
+             static_cast<std::streamsize>(points.size() * sizeof(Eigen::Vector3f)));
+  return file.good();
 }
 
 }  // namespace bievr

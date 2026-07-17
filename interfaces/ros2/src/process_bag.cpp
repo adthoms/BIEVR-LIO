@@ -100,6 +100,12 @@ int main(int argc, char** argv) {
   reader.close();
   LOG(I, "Bag closed");
 
+  // Dump the final map when a target path is configured. No executor spins in
+  // this batch tool, so a save_map service would never be callable here.
+  if (!config.pipeline_config.map_path.empty()) {
+    pipeline->saveMapPCD(config.pipeline_config.map_path);
+  }
+
   rclcpp::shutdown();
   return 0;
 }

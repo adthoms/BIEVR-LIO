@@ -5,11 +5,13 @@
 #include <tbb/task_arena.h>
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <string>
 
 #include "bievr_lio/config_loader.h"
@@ -43,6 +45,20 @@ int main(int argc, char** argv) {
   auto pipeline = std::make_shared<bievr::Pipeline>(config.pipeline_config);
   auto synchronizer = std::make_shared<bievr::Synchronizer>(pipeline);
   auto lio_pub = std::make_shared<bievr::Publisher>(node, pipeline, "bievr_lio");
+
+  // On-demand map dump (`ros2 service call /bievr_lio/save_map std_srvs/srv/Trigger`).
+  // The default executor is single-threaded, so the callback never runs
+  // concurrently with frame processing.
+  auto save_map_srv = node->create_service<std_srvs::srv::Trigger>(
+      "bievr_lio/save_map",
+      [&config, &pipeline](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                           std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        const std::string& configured = config.pipeline_config.map_path;
+        const std::string path =
+            std::filesystem::absolute(configured.empty() ? "bievr_map.pcd" : configured).string();
+        response->success = pipeline->saveMapPCD(path);
+        response->message = (response->success ? "Saved map to " : "Failed to save map to ") + path;
+      });
 
   // ROS2 has no ShapeShifter: discover the pointcloud topic's type from the
   // graph, then use a generic (serialized) subscription to handle whichever of
@@ -109,6 +125,12 @@ int main(int argc, char** argv) {
       });
 
   rclcpp::spin(node);
+
+  // Final map dump on shutdown (Ctrl-C) when a target path is configured.
+  if (!config.pipeline_config.map_path.empty()) {
+    pipeline->saveMapPCD(config.pipeline_config.map_path);
+  }
+
   rclcpp::shutdown();
   return 0;
 }
