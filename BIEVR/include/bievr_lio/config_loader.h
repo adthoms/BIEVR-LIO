@@ -22,6 +22,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <filesystem>
+#include <cmath>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -163,6 +164,20 @@ inline void printConfigOverview(const Config& config) {
   os << "  huber_delta:          " << hc.registration.huber_delta << "\n";
   os << "  img_residual:         " << yn(hc.registration.img_residual) << "\n";
   os << "  img_jacobian:         " << yn(hc.registration.img_jacobian) << "\n";
+  os << "  lm_debug_print:       " << yn(hc.registration.lm_debug_print) << "\n";
+  os << "intensity:\n";
+  os << "  enabled:              " << yn(hc.intensity.enabled) << "\n";
+  os << "  projection:           " << hc.intensity.projection << "\n";
+  os << "  image_size:           " << hc.intensity.width << " x " << hc.intensity.height << "\n";
+  os << "  vertical_fov_deg:     " << hc.intensity.vertical_fov_deg << "\n";
+  os << "  raw_scale:            " << hc.intensity.raw_scale << "\n";
+  os << "  scale:                " << hc.intensity.scale << "\n";
+  os << "  window:               " << hc.intensity.window_width << " x "
+     << hc.intensity.window_height << "\n";
+  os << "  line_removal:         " << yn(hc.intensity.line_removal) << "\n";
+  os << "  photo_scale:          " << hc.intensity.photo_scale << "\n";
+  os << "  max_voxels:           " << hc.intensity.max_voxels << "\n";
+  os << "  downsample_resolution_m: " << hc.intensity.downsample_resolution << "\n";
   os << "imu:\n";
   os << "  window_s:             " << hc.imu.window_length_s << "\n";
   os << "  t_init:               " << hc.imu.t_init << "\n";
@@ -191,18 +206,45 @@ inline void printConfigOverview(const Config& config) {
 // be opened or parsed.
 inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Config& config) {
   config_internal::MergedYaml yaml;
+  // Profiles provide sensor defaults. Explicit leaves in the input YAMLs always win.
+  std::vector<YAML::Node> documents;
   for (const std::string& path : yaml_paths) {
     if (path.empty()) {
       continue;
     }
     LOG(I, "Loading config from '" << path << "'.");
     try {
-      yaml.add(YAML::LoadFile(path));
+      const auto document = YAML::LoadFile(path);
+      documents.push_back(document);
     } catch (const std::exception& e) {
       LOG(E, "Failed to load YAML config '" << path << "': " << e.what());
       return false;
     }
   }
+  try {
+    config_internal::MergedYaml explicit_yaml;
+    for (const auto& document : documents) explicit_yaml.add(document);
+    if (explicit_yaml.get<bool>("intensity", "enabled", true)) {
+      size_t index = 0;
+      for (const auto& path : yaml_paths) {
+        if (path.empty()) continue;
+        const auto& document = documents[index++];
+        if (!document["intensity"] || !document["intensity"]["profile"]) continue;
+        auto profile = std::filesystem::path(document["intensity"]["profile"].as<std::string>());
+        if (profile.is_relative()) profile = std::filesystem::path(path).parent_path() / profile;
+        const auto defaults = YAML::LoadFile(profile.string());
+        if (defaults["intensity"] && defaults["intensity"]["line_removal"] &&
+            defaults["intensity"]["line_removal"].as<bool>()) {
+          yaml.add(YAML::LoadFile((profile.parent_path() / "line_removal.yaml").string()));
+        }
+        yaml.add(defaults);
+      }
+    }
+  } catch (const std::exception& error) {
+    LOG(E, "Failed to load intensity profile: " << error.what());
+    return false;
+  }
+  for (const auto& document : documents) yaml.add(document);
 
   auto& tc = config.topic_config;
   auto& hc = config.pipeline_config;
@@ -245,6 +287,48 @@ inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Confi
   }
   hc.registration.img_residual = yaml.get<bool>("optimization", "img_residual", true);
   hc.registration.img_jacobian = yaml.get<bool>("optimization", "img_jacobian", true);
+  hc.registration.lm_debug_print = yaml.get<bool>("optimization", "lm_debug_print", false);
+
+  // --- intensity ---
+  try {
+    auto& ic = hc.intensity;
+    ic.enabled = yaml.get<bool>("intensity", "enabled", true);
+    ic.projection = yaml.get<std::string>("intensity", "projection", "spherical");
+    ic.width = yaml.get<int>("intensity", "width", 1024);
+    ic.height = yaml.get<int>("intensity", "height", 128);
+    ic.vertical_fov_deg = yaml.get<double>("intensity", "vertical_fov_deg", 180.0);
+    ic.scale = yaml.get<double>("intensity", "scale", 140.0);
+    ic.raw_scale = yaml.get<double>("intensity", "raw_scale", 1.0);
+    ic.window_width = yaml.get<int>("intensity", "window_width", 41);
+    ic.window_height = yaml.get<int>("intensity", "window_height", 7);
+    ic.pixel_shift_by_row = yaml.get<std::vector<int>>("intensity", "pixel_shift_by_row", {});
+    ic.line_removal = yaml.get<bool>("intensity", "line_removal", false);
+    ic.highpass = yaml.get<std::vector<double>>("intensity", "highpass", {});
+    ic.lowpass = yaml.get<std::vector<double>>("intensity", "lowpass", {});
+    ic.photo_scale = yaml.get<double>("intensity", "photo_scale", 0.003);
+    const int max_voxels = yaml.get<int>("intensity", "max_voxels", 100);
+    ic.downsample_resolution = yaml.get<double>("intensity", "downsample_resolution_m", 0.1);
+    validateIntensityConfig(ic);
+    auto positive = [](double value) { return std::isfinite(value) && value > 0.0; };
+    if (ic.enabled &&
+        ((ic.projection != "spherical" && ic.projection != "ouster_lut") ||
+         ic.width <= 0 || ic.height <= 0 || ic.window_width <= 0 || ic.window_height <= 0 ||
+         ic.window_width % 2 == 0 || ic.window_height % 2 == 0 ||
+         !positive(ic.vertical_fov_deg) || ic.vertical_fov_deg > 180.0 ||
+         !positive(ic.scale) || !positive(ic.raw_scale) || !positive(ic.photo_scale) ||
+         !positive(ic.downsample_resolution) || max_voxels <= 0 ||
+         (ic.projection == "ouster_lut" && ic.pixel_shift_by_row.size() != size_t(ic.height)) ||
+         (ic.line_removal && (ic.projection != "ouster_lut" || ic.highpass.empty() ||
+                              ic.lowpass.empty())))) {
+      LOG(E, "Invalid intensity configuration: check projection, dimensions, scales and profile.");
+      return false;
+    }
+    ic.max_voxels = max_voxels > 0 ? static_cast<size_t>(max_voxels) : 0;
+    hc.registration.photo_scale = ic.photo_scale;
+  } catch (const std::exception& e) {
+    LOG(E, "Failed to load intensity configuration: " << e.what());
+    return false;
+  }
 
   // --- imu (params side: inertial window + normalization) ---
   if (!config_internal::getPositive(yaml, "imu", "window_s", 10., hc.imu.window_length_s) ||

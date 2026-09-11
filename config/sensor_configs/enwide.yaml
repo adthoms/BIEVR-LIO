@@ -1,3 +1,6 @@
+intensity:
+  profile: "../intensity/ouster_enwide.yaml"
+
 topics:
   pointcloud: "/ouster/points"
   imu: "/ouster/imu"

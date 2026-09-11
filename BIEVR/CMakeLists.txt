@@ -76,7 +76,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-  foreach(test_name intensity_processing intensity_map intensity_sampling intensity_registration)
+  foreach(test_name intensity_processing intensity_map intensity_sampling intensity_registration intensity_pipeline)
     add_executable(test_${test_name} tests/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} PRIVATE ${PROJECT_NAME})
     target_compile_features(test_${test_name} PRIVATE cxx_std_20)
@@ -86,6 +86,14 @@ if(BUILD_TESTING)
     set_tests_properties(${test_name} PROPERTIES
       ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:${PROJECT_NAME}>:$ENV{LD_LIBRARY_PATH}")
   endforeach()
+  find_package(yaml-cpp REQUIRED)
+  add_executable(test_intensity_config tests/test_intensity_config.cpp)
+  target_link_libraries(test_intensity_config PRIVATE ${PROJECT_NAME} yaml-cpp)
+  target_compile_features(test_intensity_config PRIVATE cxx_std_20)
+  target_compile_options(test_intensity_config PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fconcepts>)
+  add_test(NAME intensity_config COMMAND test_intensity_config ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  set_tests_properties(intensity_config PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:${PROJECT_NAME}>:$ENV{LD_LIBRARY_PATH}")
 endif()
 
 # ---------------------------------------------------------------------------

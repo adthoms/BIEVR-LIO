@@ -80,6 +80,21 @@ foreach(target process_topics process_bag)
   endif()
 endforeach()
 
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(test_intensity_conversion test/test_intensity_conversion.cpp)
+  ament_target_dependencies(test_intensity_conversion ${ament_dependencies})
+  target_include_directories(test_intensity_conversion BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../BIEVR/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ros_common/include
+  )
+  target_link_libraries(test_intensity_conversion
+    bievr_lio::bievr_lio bievr_ros_common::bievr_ros_common TBB::tbb)
+  add_test(NAME intensity_conversion COMMAND test_intensity_conversion)
+  set_tests_properties(intensity_conversion PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:bievr_lio::bievr_lio>:$ENV{LD_LIBRARY_PATH}")
+endif()
+
 # ---- Install ----
 install(TARGETS process_topics process_bag
   DESTINATION lib/${PROJECT_NAME}

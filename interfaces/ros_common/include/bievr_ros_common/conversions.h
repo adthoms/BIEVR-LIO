@@ -126,6 +126,37 @@ inline T readAt(const uint8_t* p) {
   return v;
 }
 
+template <typename FieldT>
+size_t intensityFieldSize(const FieldT& field) {
+  if (field.count != 1) return 0;
+  switch (field.datatype) {
+    case FieldT::INT8:
+    case FieldT::UINT8: return 1;
+    case FieldT::INT16:
+    case FieldT::UINT16: return 2;
+    case FieldT::INT32:
+    case FieldT::UINT32:
+    case FieldT::FLOAT32: return 4;
+    case FieldT::FLOAT64: return 8;
+    default: return 0;
+  }
+}
+
+template <typename FieldT>
+double readIntensity(const uint8_t* p, const FieldT& field) {
+  switch (field.datatype) {
+    case FieldT::INT8: return readAt<int8_t>(p);
+    case FieldT::UINT8: return readAt<uint8_t>(p);
+    case FieldT::INT16: return readAt<int16_t>(p);
+    case FieldT::UINT16: return readAt<uint16_t>(p);
+    case FieldT::INT32: return readAt<int32_t>(p);
+    case FieldT::UINT32: return readAt<uint32_t>(p);
+    case FieldT::FLOAT32: return readAt<float>(p);
+    case FieldT::FLOAT64: return readAt<double>(p);
+    default: return 0.0;
+  }
+}
+
 // How the per-point time field is encoded in the message.
 enum class TimeEncoding {
   kNanosUint32,   // "t": uint32 nanoseconds, relative to scan start (Ouster)
@@ -178,6 +209,9 @@ bool livoxToStampedIntensity(const LivoxMsgT& pointcloud_msg, uint64_t base_stam
   }
 
   const size_t num_points = pointcloud_msg.point_num;
+  stamped_pointcloud.scan_width = num_points;
+  stamped_pointcloud.scan_height = 1;
+  stamped_pointcloud.has_intensity = true;
   if (num_points == 0) {
     LOG(W, "Skipping empty Livox pointcloud with timestamp " << base_stamp_ns << ".");
     return false;
@@ -244,7 +278,9 @@ bool msgToPointcloud(const PointCloud2T& pointcloud_msg,
   }
 
   // Skip empty clouds
-  const size_t num_points = pointcloud_msg.height * pointcloud_msg.width;
+  const size_t num_points = static_cast<size_t>(pointcloud_msg.height) * pointcloud_msg.width;
+  stamped_pointcloud.scan_width = pointcloud_msg.width;
+  stamped_pointcloud.scan_height = pointcloud_msg.height;
   if (num_points == 0) {
     LOG(W, "Skipping empty pointcloud with timestamp " << stamp_ns << ".");
     return false;
@@ -279,18 +315,28 @@ bool msgToPointcloud(const PointCloud2T& pointcloud_msg,
     return false;
   }
 
-  // Optional float32 intensity channel.
+  // Preserve whether a measurement exists: a real zero return is valid intensity.
   const PointFieldT* i_field = findField(fields, "intensity");
-  const bool has_intensity = i_field != nullptr && i_field->datatype == PointFieldT::FLOAT32;
+  const size_t intensity_size = i_field ? intensityFieldSize(*i_field) : 0;
+  const bool has_intensity = intensity_size > 0 &&
+                            i_field->offset + intensity_size <= pointcloud_msg.point_step;
+  stamped_pointcloud.has_intensity = has_intensity;
   const uint32_t off_i = has_intensity ? i_field->offset : 0;
   if (!has_intensity) {
-    LOG_FIRST(W, 1, "Pointcloud has no float32 'intensity' field; intensity set to zero.");
+    LOG_FIRST(W, 1, "Pointcloud has no supported 'intensity' field; using geometry only.");
   }
 
   stamped_pointcloud.resize(num_points);
   auto& data = stamped_pointcloud.data();
   const uint8_t* base = pointcloud_msg.data.data();
   const size_t step = pointcloud_msg.point_step;
+  const size_t row_step = pointcloud_msg.row_step;
+  const size_t width = pointcloud_msg.width;
+  if (row_step < width * step ||
+      pointcloud_msg.data.size() < (pointcloud_msg.height - 1) * row_step + width * step) {
+    LOG(W, "Skipping pointcloud with truncated rows.");
+    return false;
+  }
   const double stamp_s = stampToS(pointcloud_msg.header.stamp);
 
   // Fill xyz, time and intensity in a single parallel pass. Each point writes its
@@ -298,7 +344,7 @@ bool msgToPointcloud(const PointCloud2T& pointcloud_msg,
   tbb::parallel_for(
       tbb::blocked_range<size_t>(0, num_points), [&](const tbb::blocked_range<size_t>& r) {
         for (size_t i = r.begin(); i != r.end(); ++i) {
-          const uint8_t* p = base + i * step;
+          const uint8_t* p = base + (i / width) * row_step + (i % width) * step;
           auto col = data.col(i);
 
           double time;
@@ -326,7 +372,7 @@ bool msgToPointcloud(const PointCloud2T& pointcloud_msg,
           } else {
             col(0) = col(1) = col(2) = col(3) = 0.0;
           }
-          col(4) = has_intensity ? static_cast<double>(readAt<float>(p + off_i)) : 0.0;
+          col(4) = has_intensity ? readIntensity(p + off_i, *i_field) : 0.0;
         }
       });
 

@@ -1,0 +1,10 @@
+# Factory pixel shifts from ethz-asl/COIN-LIO/config/os_newer_college.json.
+# Copyright (c) 2024, Autonomous Systems Lab, ETH Zurich. See LICENSE.
+# Applies to the NCD sensor's original organized, staggered 1024x128 cloud.
+intensity:
+  projection: ouster_lut
+  width: 1024
+  height: 128
+  raw_scale: 0.25
+  line_removal: true
+  pixel_shift_by_row: [63, 42, 21, 1, 61, 41, 22, 2, 60, 41, 22, 3, 59, 41, 22, 4, 59, 40, 22, 4, 58, 40, 23, 5, 57, 40, 23, 6, 57, 40, 23, 6, 56, 40, 23, 6, 56, 39, 23, 7, 56, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 55, 39, 23, 7, 56, 39, 23, 6, 56, 39, 23, 6, 56, 40, 23, 6, 57, 40, 22, 5, 57, 40, 22, 5, 58, 40, 22, 4, 58, 40, 22, 3, 59, 41, 22, 2, 60, 41, 21, 1, 61, 41, 21, 0]

@@ -2,6 +2,8 @@
 
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <limits>
 
 #include "bievr_lio/inertial_factor.h"
 #include "bievr_lio/prior_factor.h"
@@ -12,7 +14,9 @@
 namespace bievr {
 
 Pipeline::Pipeline(const Config& config) : config_(config) {
+  validateIntensityConfig(config_.intensity);
   map_ = std::make_shared<BIEVRMap>(config_.map);
+  config_.registration.photo_scale = config_.intensity.photo_scale;
 
   if (!config_.log_path.empty()) {
     LOG(I, "Logging to " << config_.log_path);
@@ -59,8 +63,10 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   // Remove points outside of intended range
   timing::Timer filter_timer("01_filter");
   StampedIntensityPointcloud points_filtered_L;
+  std::vector<size_t> filtered_indices;
   filterMinMaxRange(points_L, points_filtered_L, config_.preprocess.min_range,
-                    config_.preprocess.max_range);
+                    config_.preprocess.max_range,
+                    config_.intensity.enabled ? &filtered_indices : nullptr);
   // The per-point time and intensity stay in points_filtered_L; we only take
   // zero-copy views onto those rows. Undistortion consumes the time view, intensity
   // rides through to publishing. Both views remain valid for the whole frame and
@@ -73,6 +79,28 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   // time and intensity are never rewritten.
   const Pointcloud points_filtered_I = transformPoints(config_.T_I_L, points_filtered_L);
   filter_timer.Stop();
+
+  IntensityFrame normalized;
+  if (config_.intensity.enabled && points_L.has_intensity && !points_filtered_L.empty()) {
+    timing::Timer intensity_timer("01_intensity");
+    // Normalize before discarding original Ouster pixel indices or moving points into the IMU.
+    try {
+      const auto full = normalizeIntensity(points_L, config_.intensity,
+                                           config_.preprocess.min_range,
+                                           config_.preprocess.max_range);
+      normalized.values.resize(points_filtered_L.size());
+      normalized.valid.resize(points_filtered_L.size());
+      for (size_t i = 0; i < filtered_indices.size(); ++i) {
+        normalized.values[i] = full.values[filtered_indices[i]];
+        normalized.valid[i] = full.valid[filtered_indices[i]];
+      }
+    } catch (const std::invalid_argument& error) {
+      LOG_FIRST(W, 1, "Intensity preprocessing unavailable for this scan; using geometry: "
+                          << error.what());
+    }
+  }
+  const bool have_intensity = std::any_of(normalized.valid.begin(), normalized.valid.end(),
+                                          [](uint8_t valid) { return valid != 0; });
 
   if (phase_ == Phase::NeedBias) {
     // Estimate initial biases and orientation based on zero velocity assumption.
@@ -119,23 +147,64 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   undistortion_timer.Stop();
 
   std::vector<double> ranges;
-  calculateRanges(points_undistorted_I, ranges);
+  if (have_intensity) {
+    ranges.resize(points_filtered_L.size());
+    for (size_t i = 0; i < ranges.size(); ++i) ranges[i] = points_filtered_L[i].head<3>().norm();
+  } else {
+    calculateRanges(points_undistorted_I, ranges);
+  }
   const Transform T_W_I_init(x_j_pred.quat, x_j_pred.p);
   if (phase_ == Phase::NeedMap) {
     tryInitMap(imu_data.back().stamp, x_j_pred, T_W_I_init, points_undistorted_I, intensities,
-               ranges, header);
+               ranges, header, have_intensity ? &normalized : nullptr);
     return;
   }
 
   // Select points from the source cloud that will be used for registration
   timing::Timer voxel_timer("04_sampling");
   Pointcloud source_filtered, source_coarse, source_fine;
-  sampleSource(points_undistorted_I, T_W_I_init, source_filtered, source_coarse, source_fine);
+  std::vector<size_t> source_indices;
+  sampleSource(points_undistorted_I, T_W_I_init, source_filtered, source_coarse, source_fine,
+                have_intensity ? &source_indices : nullptr);
+  Intensities source_intensities;
+  std::vector<uint8_t> photometric_flags;
+  IntensitySamples intensity_samples;
+  if (have_intensity) {
+    intensity_samples = sampleIntensity(*map_, T_W_I_init, points_undistorted_I,
+                                        normalized.valid, config_.intensity.max_voxels,
+                                        config_.intensity.downsample_resolution);
+    // Union by original point identity: a point selected by both modalities contributes
+    // geometry once, while still retaining its photometric residual.
+    std::vector<size_t> source_position(points_undistorted_I.size(),
+                                        std::numeric_limits<size_t>::max());
+    for (size_t i = 0; i < source_indices.size(); ++i) source_position[source_indices[i]] = i;
+    for (size_t index : intensity_samples.indices) {
+      if (source_position[index] == std::numeric_limits<size_t>::max()) {
+        source_position[index] = source_indices.size();
+        source_indices.push_back(index);
+      }
+    }
+    source_filtered.resize(source_indices.size());
+    source_intensities.resize(source_indices.size());
+    photometric_flags.assign(source_indices.size(), 0);
+    for (size_t i = 0; i < source_indices.size(); ++i) {
+      source_filtered[i] = points_undistorted_I[source_indices[i]];
+      source_intensities[i] = normalized.values[source_indices[i]];
+    }
+    for (size_t index : intensity_samples.indices) photometric_flags[source_position[index]] = 1;
+  }
   voxel_timer.Stop();
 
   // Perform the actual registration
   timing::Timer align_timer("05_registration");
-  LsqRegistration optimizer(*map_, source_filtered, config_.registration);
+  if (config_.registration.lm_debug_print) {
+    LOG(I, "Registration stamp_ns=" << points_L.end_stamp
+                                      << " prior_xyz=" << T_W_I_init.translation().transpose()
+                                      << " velocity=" << x_j_pred.v.transpose());
+  }
+  LsqRegistration optimizer(*map_, source_filtered, config_.registration,
+                             intensity_samples.indices.empty() ? nullptr : &source_intensities,
+                             intensity_samples.indices.empty() ? nullptr : &photometric_flags);
   const Transform T_W_I = optimizer.computeTransformation(T_W_I_init);
   const int n_effective_points = optimizer.numEffectivePoints();
   align_timer.Stop();
@@ -143,7 +212,8 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   // Transform the full cloud using the estimated pose and add it to the map
   timing::Timer map_timer("06_map");
   const Pointcloud points_registered = T_W_I * points_undistorted_I;
-  map_->integratePoints(points_registered, &ranges);
+  map_->integratePoints(points_registered, &ranges, have_intensity ? &normalized.values : nullptr,
+                        have_intensity ? &normalized.valid : nullptr);
   map_timer.Stop();
 
   // Bookkeeping and optimization of the intertial part of the state
@@ -170,6 +240,10 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
 
   if (config_.print_timing) {
     LOG(I, "Timings:\n" << timing::Timing::Print());
+  }
+  if (config_.intensity.enabled && (config_.print_timing || config_.print_debug)) {
+    LOG(I, "Intensity voxels: " << intensity_samples.num_voxels
+                                 << ", photometric points: " << optimizer.numPhotometricPoints());
   }
 
   if (config_.print_dashboard) {
@@ -224,10 +298,12 @@ bool Pipeline::initializeBias(const std::vector<ImuMeasurement>& imu_data,
 
 void Pipeline::tryInitMap(uint64_t stamp, const State& x_j_pred, const Transform& T_W_I_init,
                           const Pointcloud& undistorted, const IntensityView& intensities,
-                          std::vector<double>& ranges, const Header& header) {
+                          std::vector<double>& ranges, const Header& header,
+                          const IntensityFrame* normalized) {
   if (undistorted.size() < config_.min_points_for_map_init) return;
   const Pointcloud registered = T_W_I_init * undistorted;
-  map_->integratePoints(registered, &ranges);
+  map_->integratePoints(registered, &ranges, normalized ? &normalized->values : nullptr,
+                        normalized ? &normalized->valid : nullptr);
   addState(stamp, x_j_pred.quat, x_j_pred.p, x_j_pred.v);
   publishLatestState(header);
   publish(IntensityPointcloud(registered, intensities), header, "points/registered");
@@ -237,15 +313,26 @@ void Pipeline::tryInitMap(uint64_t stamp, const State& x_j_pred, const Transform
 }
 
 void Pipeline::sampleSource(const Pointcloud& undistorted, const Transform& T_W_I_init,
-                            Pointcloud& filtered, Pointcloud& coarse, Pointcloud& fine) const {
+                            Pointcloud& filtered, Pointcloud& coarse, Pointcloud& fine,
+                            std::vector<size_t>* indices) const {
   Pointcloud source_down;
-  voxelDownsample(undistorted, source_down, config_.preprocess.downsample_resolution);
+  std::vector<size_t> down_indices, coarse_indices, fine_indices;
+  voxelDownsample(undistorted, source_down, config_.preprocess.downsample_resolution,
+                   indices ? &down_indices : nullptr);
   if (config_.preprocess.informed_sampling) {
     sampleInformed(*map_, T_W_I_init, source_down, coarse, fine,
-                   config_.preprocess.downsample_resolution, config_.informed_sample_count);
+                   config_.preprocess.downsample_resolution, config_.informed_sample_count,
+                   indices ? &coarse_indices : nullptr, indices ? &fine_indices : nullptr);
     filtered = fine + coarse;
+    if (indices) {
+      indices->clear();
+      indices->reserve(fine_indices.size() + coarse_indices.size());
+      for (size_t i : fine_indices) indices->push_back(down_indices[i]);
+      for (size_t i : coarse_indices) indices->push_back(down_indices[i]);
+    }
   } else {
     filtered = source_down;
+    if (indices) *indices = std::move(down_indices);
   }
 }
 

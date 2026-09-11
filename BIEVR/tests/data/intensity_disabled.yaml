@@ -1,0 +1,3 @@
+intensity:
+  enabled: false
+  profile: missing_profile_is_unused.yaml

@@ -1,0 +1,10 @@
+# Factory pixel shifts from ethz-asl/COIN-LIO/config/os_enwide.json.
+# Copyright (c) 2024, Autonomous Systems Lab, ETH Zurich. See LICENSE.
+# Applies to the ENWIDE sensor's original organized, staggered 1024x128 cloud.
+intensity:
+  projection: ouster_lut
+  width: 1024
+  height: 128
+  raw_scale: 0.25
+  line_removal: true
+  pixel_shift_by_row: [31, 10, -10, -30, 30, 10, -10, -29, 29, 10, -9, -28, 28, 9, -9, -27, 27, 9, -9, -27, 27, 9, -9, -26, 26, 9, -9, -26, 26, 8, -8, -25, 25, 8, -8, -25, 25, 8, -8, -25, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 24, 8, -8, -24, 25, 8, -8, -25, 25, 8, -8, -25, 25, 8, -8, -25, 26, 9, -9, -26, 26, 9, -9, -27, 27, 9, -9, -27, 27, 9, -9, -28, 28, 9, -10, -29, 29, 10, -10, -30, 30, 10, -10, -31]

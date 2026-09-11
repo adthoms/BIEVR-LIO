@@ -15,6 +15,15 @@ preprocess:
 optimization:
   huber_delta: 0.1 # Huber norm threshold
 
+intensity:
+  enabled: True # COIN-BIEVR; False restores geometry-only BIEVR-LIO
+  scale: 140.0 # Normalized intensity scale; output is limited to [0, 255]
+  window_width: 41 # Occupied-pixel brightness window, in pixels (odd)
+  window_height: 7
+  photo_scale: 0.003 # Multiplier on photometric residuals before Huber loss
+  max_voxels: 100 # Highest-scoring intensity voxels per scan
+  downsample_resolution_m: 0.1
+
 imu:  
     window_s: 10 # Time window for the inertial optimization [s]
     t_init: 0.2 # Time to initialize bias and gravity [s]
