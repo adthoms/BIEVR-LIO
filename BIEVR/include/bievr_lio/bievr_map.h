@@ -11,6 +11,9 @@
 
 namespace bievr {
 
+// World-frame xyz, acquisition range, and normalized intensity (NaN when unavailable).
+using MapPoint = Eigen::Matrix<double, 5, 1>;
+
 struct Voxel {
   bool observed_{false};  // We consider a voxel observed if we have seen enough points inside it
   Transform T_C_W_ = Transform::Identity();
@@ -18,13 +21,19 @@ struct Voxel {
   Eigen::MatrixXf bump_img_;
   Eigen::MatrixXf bump_smoothed_;
   Eigen::MatrixXf bump_weights_;
+  // Allocated only after the voxel receives a valid intensity measurement. Separate weights
+  // distinguish missing appearance from a valid zero-intensity return.
+  Eigen::MatrixXf intensity_img_;
+  Eigen::MatrixXf intensity_smoothed_;
+  Eigen::MatrixXf intensity_weights_;
+  Eigen::Vector2d intensity_score_ = Eigen::Vector2d::Zero();
   M3 outer_sum_ = Eigen::Matrix3d::Zero();
   V3 sum_ = Eigen::Vector3d::Zero();
   size_t num_points_{0};
   double mean_img_dist_{0.0};
   // Raw points accumulated while the voxel is not yet observed (no normal yet, so they cannot be
   // projected into a bump image). Cleared once the voxel becomes observed.
-  std::vector<Eigen::Vector4d> pending_points_;
+  std::vector<MapPoint> pending_points_;
 };
 
 class BIEVRMap {
@@ -40,7 +49,11 @@ class BIEVRMap {
 
   explicit BIEVRMap(Config config);
 
-  bool integratePoints(const Pointcloud& input_cloud, const std::vector<double>* ranges = nullptr);
+  // Optional attributes must match the cloud's column order and size. Non-finite intensity
+  // values and entries with a zero validity mask are ignored without discarding geometry.
+  bool integratePoints(const Pointcloud& input_cloud, const std::vector<double>* ranges = nullptr,
+                       const Intensities* intensities = nullptr,
+                       const std::vector<uint8_t>* intensity_valid = nullptr);
 
   inline size_t hashIndex(const Point& point) const {
     Eigen::Vector3i voxel_idx = (point * inv_voxel_size_).array().floor().cast<int>();
@@ -68,14 +81,14 @@ class BIEVRMap {
   // Voxel update / bump-image pipeline, in the order integratePoints invokes them.
   bool updateNormal(Voxel& voxel);
 
-  bool updateBumpImage(const std::vector<Eigen::Vector4d>& points, Voxel& voxel,
+  bool updateBumpImage(const std::vector<MapPoint>& points, Voxel& voxel,
                        bool normal_change);
 
   ImageBounds computeImageSize(const Voxel& voxel, const Point& reference_point) const;
 
   void reprojectImage(Voxel& voxel, const ImageBounds& bounds, Eigen::MatrixXi& changed);
 
-  void integratePoints(const std::vector<Eigen::Vector4d>& points, Voxel& voxel,
+  void integratePoints(const std::vector<MapPoint>& points, Voxel& voxel,
                        Eigen::MatrixXi& changed);
 
   void dilateMask(const Eigen::MatrixXi& changed, const Eigen::MatrixXf& weights,
@@ -85,6 +98,7 @@ class BIEVRMap {
                             const Eigen::MatrixXi& changed, Eigen::MatrixXf& image_smooth);
 
   void computeScore(Voxel& voxel);
+  void computeIntensityScore(Voxel& voxel);
 
   // Geometry helper.
   Eigen::Vector3d getVoxelOrigin(const Point& point) const;

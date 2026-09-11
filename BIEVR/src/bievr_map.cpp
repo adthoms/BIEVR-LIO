@@ -3,6 +3,7 @@
 #include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -41,16 +42,23 @@ BIEVRMap::BIEVRMap(Config config) : config_(config) {
   inv_px_size_ = 1.0 / config_.px_size;
 }
 
-bool BIEVRMap::integratePoints(const Pointcloud& cloud, const std::vector<double>* ranges) {
+bool BIEVRMap::integratePoints(const Pointcloud& cloud, const std::vector<double>* ranges,
+                              const Intensities* intensities,
+                              const std::vector<uint8_t>* intensity_valid) {
   if (cloud.empty()) {
     LOG(I, "No points in cloud to map.");
+    return false;
+  }
+  if ((intensities && intensities->size() != cloud.size()) ||
+      (intensity_valid && (!intensities || intensity_valid->size() != cloud.size()))) {
+    LOG(W, "Intensity attributes must match the input point cloud.");
     return false;
   }
 
   LOG(D, "Integrating " << cloud.size() << " points to the map.");
 
-  // Each entry is {voxel hash, point (xyz, plus range/weight in w)}.
-  std::vector<std::pair<size_t, Eigen::Vector4d>> hashed_points(cloud.size());
+  // Keep appearance attached to its point through sorting and pending-voxel accumulation.
+  std::vector<std::pair<size_t, MapPoint>> hashed_points(cloud.size());
 
   // Calculate Hash indices for each point
   tbb::parallel_for(tbb::blocked_range<size_t>(0, cloud.size()),
@@ -62,6 +70,11 @@ bool BIEVRMap::integratePoints(const Pointcloud& cloud, const std::vector<double
                         } else {
                           hashed_points[i].second(3) = 1;
                         }
+                        const double intensity = intensities ? (*intensities)[i]
+                            : std::numeric_limits<double>::quiet_NaN();
+                        hashed_points[i].second(4) =
+                            std::isfinite(intensity) && (!intensity_valid || (*intensity_valid)[i])
+                                ? intensity : std::numeric_limits<double>::quiet_NaN();
                         hashed_points[i].first = hashIndex(hashed_points[i].second.head(3));
                       }
                     });
@@ -80,7 +93,7 @@ bool BIEVRMap::integratePoints(const Pointcloud& cloud, const std::vector<double
 
     for (size_t i = 0; i < hashed_points.size(); ++i) {
       size_t current_hash = hashed_points[i].first;
-      if (current_hash != prev_hash) {
+      if (i == 0 || current_hash != prev_hash) {
         hash_change_indices.push_back(i);
         if (map_.find(current_hash) == map_.end()) {
           voxels_cache_.push_front(current_hash);
@@ -98,7 +111,7 @@ bool BIEVRMap::integratePoints(const Pointcloud& cloud, const std::vector<double
   tbb::parallel_for(
       tbb::blocked_range<size_t>(0, hash_change_indices.size()),
       [&](const tbb::blocked_range<size_t>& r) {
-        std::vector<Eigen::Vector4d> voxel_points;
+        std::vector<MapPoint> voxel_points;
         for (size_t i = r.begin(); i != r.end(); ++i) {
           int start_idx = hash_change_indices[i];
           int end_idx = (i + 1 < hash_change_indices.size()) ? hash_change_indices[i + 1]
@@ -200,7 +213,7 @@ bool BIEVRMap::updateNormal(Voxel& voxel) {
   return update_normal;
 }
 
-bool BIEVRMap::updateBumpImage(const std::vector<Eigen::Vector4d>& points, Voxel& voxel,
+bool BIEVRMap::updateBumpImage(const std::vector<MapPoint>& points, Voxel& voxel,
                                bool normal_change) {
   if (!voxel.observed_) {
     return false;
@@ -234,6 +247,17 @@ bool BIEVRMap::updateBumpImage(const std::vector<Eigen::Vector4d>& points, Voxel
     voxel.bump_smoothed_ = voxel.bump_img_;
   }
 
+  if (voxel.intensity_img_.size() > 0) {
+    if (config_.smooth) {
+      // Geometry's changed mask contains every appearance change, including normal reprojection.
+      maskedGaussianSmooth(voxel.intensity_img_, voxel.intensity_weights_, changed_dilated,
+                           voxel.intensity_smoothed_);
+    } else {
+      voxel.intensity_smoothed_ = voxel.intensity_img_;
+    }
+    computeIntensityScore(voxel);
+  }
+
   computeScore(voxel);
 
   return true;
@@ -260,6 +284,9 @@ BIEVRMap::ImageBounds BIEVRMap::computeImageSize(const Voxel& voxel,
 void BIEVRMap::reprojectImage(Voxel& voxel, const ImageBounds& bounds, Eigen::MatrixXi& changed) {
   Eigen::MatrixXf bump_original = voxel.bump_img_;
   Eigen::MatrixXf weights_original = voxel.bump_weights_;
+  const bool has_intensity = voxel.intensity_img_.size() > 0;
+  Eigen::MatrixXf intensity_original = std::move(voxel.intensity_img_);
+  Eigen::MatrixXf intensity_weights_original = std::move(voxel.intensity_weights_);
   Transform T_W_C_o = voxel.T_C_W_.inverse();
   voxel.bump_img_.resize(bounds.height, bounds.width);
   voxel.bump_smoothed_.resize(bounds.height, bounds.width);
@@ -269,6 +296,11 @@ void BIEVRMap::reprojectImage(Voxel& voxel, const ImageBounds& bounds, Eigen::Ma
   voxel.bump_smoothed_.setZero();
   voxel.bump_weights_.setZero();
   changed.setZero();
+  if (has_intensity) {
+    voxel.intensity_img_ = Eigen::MatrixXf::Zero(bounds.height, bounds.width);
+    voxel.intensity_smoothed_ = Eigen::MatrixXf::Zero(bounds.height, bounds.width);
+    voxel.intensity_weights_ = Eigen::MatrixXf::Zero(bounds.height, bounds.width);
+  }
   Point p_o_planar(bounds.u_min, bounds.v_min, 0.0);
   Point p_w_o = voxel.T_O_W_.inverse() * p_o_planar;
   Transform T_W_C;
@@ -292,12 +324,18 @@ void BIEVRMap::reprojectImage(Voxel& voxel, const ImageBounds& bounds, Eigen::Ma
 
       voxel.bump_img_(y, x) = p_O(2);
       voxel.bump_weights_(y, x) = weights_original(i, j);
+      if (has_intensity) {
+        // Appearance follows the height pixel that wins this existing overwrite collision policy.
+        // In particular a winner without appearance clears an earlier loser's valid intensity.
+        voxel.intensity_img_(y, x) = intensity_original(i, j);
+        voxel.intensity_weights_(y, x) = intensity_weights_original(i, j);
+      }
       changed(y, x) = 1;
     }
   }
 }
 
-void BIEVRMap::integratePoints(const std::vector<Eigen::Vector4d>& points, Voxel& voxel,
+void BIEVRMap::integratePoints(const std::vector<MapPoint>& points, Voxel& voxel,
                                Eigen::MatrixXi& changed) {
   for (const auto& p : points) {
     Point p_O = voxel.T_C_W_.linear() * p.head(3) + voxel.T_C_W_.translation();
@@ -311,6 +349,18 @@ void BIEVRMap::integratePoints(const std::vector<Eigen::Vector4d>& points, Voxel
     double weight_new = config_.weighted ? std::min(0.5, 1. / p(3)) : 1.;
     voxel.bump_weights_(y, x) += weight_new;
     voxel.bump_img_(y, x) = (mean_old * weight + weight_new * p_O(2)) / voxel.bump_weights_(y, x);
+    if (std::isfinite(p(4))) {
+      if (voxel.intensity_img_.size() == 0) {
+        voxel.intensity_img_ = Eigen::MatrixXf::Zero(voxel.bump_img_.rows(), voxel.bump_img_.cols());
+        voxel.intensity_smoothed_ = voxel.intensity_img_;
+        voxel.intensity_weights_ = voxel.intensity_img_;
+      }
+      const double intensity_weight = voxel.intensity_weights_(y, x);
+      const double intensity_mean = voxel.intensity_img_(y, x);
+      voxel.intensity_weights_(y, x) += weight_new;
+      voxel.intensity_img_(y, x) = (intensity_mean * intensity_weight + weight_new * p(4)) /
+                                  voxel.intensity_weights_(y, x);
+    }
     changed(y, x) = 1;
   }
 }
@@ -393,6 +443,26 @@ void BIEVRMap::computeScore(Voxel& voxel) {
   // correspondences
   if (total_count < 5) {
     voxel.mean_img_dist_ = 0;
+  }
+}
+
+void BIEVRMap::computeIntensityScore(Voxel& voxel) {
+  voxel.intensity_score_.setZero();
+  const auto& image = voxel.intensity_smoothed_;
+  const auto& weights = voxel.intensity_weights_;
+  for (int y = 0; y < image.rows(); ++y) {
+    for (int x = 0; x < image.cols(); ++x) {
+      if (x > 0 && x + 1 < image.cols() && weights(y, x - 1) > 0.f &&
+          weights(y, x + 1) > 0.f) {
+        voxel.intensity_score_.x() +=
+            0.5 * std::abs(static_cast<double>(image(y, x + 1)) - image(y, x - 1));
+      }
+      if (y > 0 && y + 1 < image.rows() && weights(y - 1, x) > 0.f &&
+          weights(y + 1, x) > 0.f) {
+        voxel.intensity_score_.y() +=
+            0.5 * std::abs(static_cast<double>(image(y + 1, x)) - image(y - 1, x));
+      }
+    }
   }
 }
 

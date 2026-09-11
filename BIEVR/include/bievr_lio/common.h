@@ -190,8 +190,12 @@ class StampedIntensityPointcloud : public PointcloudBase<StampedIntensityPoint> 
   IntensityView intensities() const { return rowView(kIntensityRow); }
 
   StampedIntensityPointcloud operator+(const StampedIntensityPointcloud& other) const = delete;
-  uint64_t stamp;
-  uint64_t end_stamp;
+  uint64_t stamp = 0;
+  uint64_t end_stamp = 0;
+  // Original message organization, consumed before filtering for factory pixel lookup.
+  size_t scan_width = 0;
+  size_t scan_height = 0;
+  bool has_intensity = true;
 
  private:
   RowView rowView(int row) const {

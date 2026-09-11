@@ -34,6 +34,7 @@ add_library(${PROJECT_NAME}
   src/pipeline.cpp
   src/imu_integrator.cpp
   src/inertial_factor.cpp
+  src/intensity_processing.cpp
   src/ls_optimizer.cpp
   src/preprocess.cpp
   src/prior_factor.cpp
@@ -71,6 +72,20 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 )
 if(glog_FOUND)
   target_link_libraries(${PROJECT_NAME} PUBLIC glog::glog)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  foreach(test_name intensity_processing intensity_map)
+    add_executable(test_${test_name} tests/test_${test_name}.cpp)
+    target_link_libraries(test_${test_name} PRIVATE ${PROJECT_NAME})
+    target_compile_features(test_${test_name} PRIVATE cxx_std_20)
+    target_compile_options(test_${test_name} PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fconcepts>)
+    add_test(NAME ${test_name} COMMAND test_${test_name})
+    # Prefer this build over a previously sourced workspace containing the same library name.
+    set_tests_properties(${test_name} PROPERTIES
+      ENVIRONMENT "LD_LIBRARY_PATH=$<TARGET_FILE_DIR:${PROJECT_NAME}>:$ENV{LD_LIBRARY_PATH}")
+  endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
