@@ -6,6 +6,10 @@ Intensity processing is enabled by default. ROS1 and ROS2 use the same CPU
 implementation in the ROS-independent core, with Eigen and TBB; no GPU or
 OpenCV dependency is added.
 
+This independent implementation has not reproduced the paper's reported ATE.
+The [comparison and audit](#historical-measurements-and-paper-comparison) record
+the measured gaps and the Ouster filter correction.
+
 ## Configuration and input
 
 Existing launch commands continue to work. For example:
@@ -39,6 +43,10 @@ ENWIDE and Newer College sensor configurations load
 These profiles specify 1024 × 128 Ouster projection, per-row pixel shifts,
 raw intensity scaling of 0.25, and line removal. Profiles that enable line
 removal also load the neighboring `line_removal.yaml` filter coefficients.
+The separable line filter operates on zero-filled missing pixels; filtering
+does not make a missing return valid. Horizontal boundaries wrap and vertical
+boundaries reflect. Requiring a fully occupied filter neighborhood caused
+abrupt correction changes and has been removed.
 Profile paths resolve relative to the YAML file containing `intensity.profile`.
 The loader merges profile defaults first, then explicit input YAML leaves, so
 an explicit setting such as `intensity.enabled: false` takes precedence.
@@ -48,6 +56,7 @@ row/column layout intact. Apply range filtering and motion compensation after
 intensity normalization. Other configurations, including `geode_gamma`, use
 spherical projection by default: 1024 × 128 pixels, 180° vertical field of view,
 raw scaling 1.0, and no line removal. These are configurable sensor assumptions.
+The GEODE calibration and evaluation convention is described below.
 
 Missing or nonfinite intensity has separate validity metadata; a measured zero
 remains valid. Points without appearance support can still contribute geometry.
@@ -63,8 +72,8 @@ reproduction of the paper's reported results.
 
 The paper does not specify the photometric residual weight. The initial
 COIN-LIO reference value, `0.00095`, failed late in the local TunnelS sequence.
-The default is therefore `0.003`, used globally across all four final dataset
-runs below. These sequences were also used to select the weight; validation on
+The default is therefore `0.003`, used globally across all four historical
+dataset runs below. These sequences were also used to select the weight; validation on
 additional recordings remains useful for new sensor configurations.
 
 ## Estimation and numerical details
@@ -189,7 +198,9 @@ python3 scripts/benchmark_coin_bievr.py \
 `baseline` and `geometry` both disable intensity; the install prefix selects
 which implementation runs. `coin` enables intensity. The runner uses the
 feature repository's current geometry parameters for all modes and saves the
-actual YAML. Run each build in a clean shell to avoid importing another build's
+actual algorithm YAML. Sensor configurations are read from
+`config/sensor_configs/`; archive those files separately when reproducing runs.
+Run each build in a clean shell to avoid importing another build's
 library paths. Use a fresh output directory for repeated measurements because
 the same mode/sequence path is overwritten.
 
@@ -268,14 +279,17 @@ For example, Shield1 GT has a median sampling interval of 0.36 s and ends about
 matched fractions alongside ATE; a small error on a partial trajectory does not
 establish successful completion.
 
-## Measured results
+## Historical measurements and paper comparison
 
-The baseline is commit `bc66e07ef1aa5ff22ce41206fc5ce63356e8ca64`; the feature
+The original baseline is commit `bc66e07ef1aa5ff22ce41206fc5ce63356e8ca64`; the feature
 implementation is commit `67dd0bb84bef2bc9677a9e5f02faae877fe809f0` on
 `feature/coin-bievr`, with `photo_scale: 0.003`. Both used Release
 builds with GCC 13.3 and ROS2 Kilted on an Intel Core Ultra 9 285H, with 16 logical
-CPUs available and an 8-thread estimator limit. All metrics below use evaluation
-version 2 and the frame conventions described above.
+CPUs available and an 8-thread estimator limit. These original four-sequence
+measurements use evaluation version 2 and predate the Ouster filter correction.
+Both the original and current GEODE configuration pair `/livox/imu` with the
+external-device extrinsic and normalize over 180°. Its recorded trajectory is
+evaluated in that configured external-device frame, with the caveat above.
 
 | Sequence | Baseline translation ATE RMSE (m) | COIN-BIEVR translation ATE RMSE (m) |
 | --- | ---: | ---: |
@@ -284,15 +298,15 @@ version 2 and the frame conventions described above.
 | GEODE Shield1 | 0.485710 | 0.486326 |
 | NCD QuadHard | 0.057096 | 0.057115 |
 
-The ENWIDE errors decreased substantially. The measured changes on Shield1
+In these historical runs, the ENWIDE errors decreased substantially. The measured changes on Shield1
 and QuadHard were below 0.001 m. With intensity disabled, the feature's QuadHard
 trajectory matched the baseline exactly, including its 0.057095618 m ATE.
-Replaying TunnelS after the final rebuild, using the default configuration,
-also produced a byte-identical trajectory to the validated weighted run.
+Replaying TunnelS before the Ouster filter correction, using the original
+default configuration, also produced a byte-identical trajectory to that run.
 
-The isolated build and normal ROS workspace build both passed all six core
-CTest suites and the ROS2 conversion suite. All six Python benchmark evaluation
-tests passed.
+The original isolated build and normal ROS workspace build both passed all six
+core CTest suites and the ROS2 conversion suite. The current ROS workspace
+build also passes those seven suites and all six Python evaluator tests.
 
 | Sequence | Mean processing (ms) | p95 processing (ms) | Replay throughput (Hz) | Peak RSS (MiB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -302,21 +316,67 @@ tests passed.
 | NCD QuadHard | 48.292 | 56.529 | 17.149 | 492.9 |
 
 Processing times cover estimator steps; replay throughput includes bag reading
-and process overhead. These are single-run measurements. Every final run exited
+and process overhead. These are historical, uncontended single-run measurements.
+The concurrent diagnostic runs from the later audit are not fair timing
+comparisons. Every original run exited
 successfully and processed more than 99.8% of recorded LiDAR frames. Photometric
 constraints were active in more than 99.9% of reported registration frames.
 Shield1 GT covers 95.95% of the estimated time span; its final approximately 22 s
-remain unscored. The GEODE calibration/topic convention caveat above applies.
+remain unscored. The GEODE calibration caveat described above applies.
+
+The paper reports the following ATE values in
+[Table I](https://icra2026-rigorous-perception.github.io/pdf/pfreundschuh2026.pdf):
+
+| Sequence and method | Original local ATE RMSE (m) | Current branch (m) | Paper ATE RMSE (m) |
+| --- | ---: | ---: | ---: |
+| TunnelD, COIN-BIEVR | 0.254177 | 0.297320 | 0.369 |
+| TunnelS, COIN-BIEVR | 0.988403 | 0.500880 | 0.432 |
+| Shield1, COIN-BIEVR | 0.486326 | 0.486326 | 0.220 |
+| Shield1, geometric BIEVR baseline | 0.485710 | 0.485710 | 0.256 |
+| QuadHard, COIN-BIEVR | 0.057115 | 0.054362 | 0.049 |
+
+The current implementation is commit
+`4d3419bdd8fba21f120e8a6825c046bd16efdb82`, including the Ouster filter correction.
+The global photometric weight remains 0.003. The GEODE calibration and evaluator
+retain their original behavior.
+
+The original local runs do not reproduce the paper's TunnelS or Shield1 accuracy.
+The Shield1 geometric baseline also differs, so its gap cannot be attributed
+solely to intensity registration. The sensor mismatch above is one concrete
+comparability defect. The paper does not specify its timestamp association
+protocol; using the official GEODE nearest-neighbor association with a 0.1 s
+threshold changes the old Shield1 ATE by less than 0.0006 m, which does not explain
+the reported gap.
+
+The adopted Ouster filter correction removes the extra complete-neighborhood
+gate and applies the COIN-LIO line-filter response over zero-filled missing
+pixels. Missing returns remain invalid. With the same global weight, the full
+TunnelS run improved from 0.988403 m to 0.500880 m ATE. TunnelD changed from
+0.254177 m to 0.297320 m, and QuadHard improved from 0.057115 m to 0.054362 m.
+All three runs completed with more than 99.8% frame coverage. GEODE does not
+enable this Ouster filter, so its original result remains 0.486326 m.
+The saved Ouster audit artifacts carry version-3 metadata from the experimental
+runner; re-evaluating their trajectories with the retained version-2 evaluator
+reproduces all three ATE values exactly.
+
+This establishes a consequential implementation difference, but the remaining
+TunnelS and Shield1 accuracy gaps are unresolved. The paper does not publish
+the residual weight or full preprocessing and evaluation configuration needed
+to claim an exact numerical reproduction. The sampler's sign-invariant scoring
+and the LM support policy described above also remain explicit implementation
+choices.
 
 Recorded artifacts are under the workspace root:
 
 - `.cache/coin-bievr/results/baseline/<sequence>/`: baseline runs.
-- `.cache/coin-bievr/weight-003/coin/<sequence>/`: final runs with the adopted
+- `.cache/coin-bievr/weight-003/coin/<sequence>/`: original runs with the adopted
   global weight, including exact YAML, trajectories, logs, and `result.json`.
 - `.cache/coin-bievr/results/geometry/quad_hard/`: intensity-disabled regression.
 - `.cache/coin-bievr/final-default/coin/tunnel_s/`: final default-configuration replay.
+- `.cache/coin-bievr/paper-gap/line-filter-results/coin/`: isolated Ouster
+  filter-support comparisons.
 
-The validated sequences are TunnelD, TunnelS, Shield1, and QuadHard. Cloister
+The historical validation covered TunnelD, TunnelS, Shield1, and QuadHard. Cloister
 was not replayed, and FlatSurfacesS was unavailable locally. These measurements
 establish behavior on the available recordings, without claiming exact
 reproduction of the paper's experimental setup or results.
