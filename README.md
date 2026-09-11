@@ -27,6 +27,10 @@ BIEVR-LIO is a robust LiDAR-Inertial Odometry framework that uses a high-resolut
 voxel-wise oriented height image map to exploit subtle geometric variations in
 challenging, information-sparse environments.
 
+This branch also enables COIN-BIEVR intensity constraints by default. See the
+[COIN-BIEVR guide](doc/coin_bievr.md) for configuration, geometry-only operation,
+tests, and reproducible dataset comparisons.
+
 <details>
 <summary><b>Abstract</b></summary>
 <br>
