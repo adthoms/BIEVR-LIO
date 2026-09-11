@@ -179,8 +179,16 @@ void ousterLineArtifactIsRemovedBeforeNormalization() {
   near(frame.values(4), 140.0 * 10.0 / 11.0, "row artifact not removed");
   cloud.intensities()(0, 0) = -1.0;
   const auto sparse = bievr::normalizeIntensity(cloud, config, 0.1, 100.0);
-  near(sparse.values(4), 140.0 * 20.0 / 21.0,
-       "missing pixel manufactured a line correction");
+  near(sparse.values(4), 140.0 * 5.0 / 6.0,
+       "vertical line filter did not use the zero-filled missing pixel");
+  require(sparse.valid[0] == 0, "line filtering made a missing return valid");
+  near(sparse.values(0), 0.0, "line filtering assigned intensity to a missing return");
+
+  config.lowpass = {0.5, 0.0, 0.5};
+  const auto horizontal = bievr::normalizeIntensity(cloud, config, 0.1, 100.0);
+  near(horizontal.values(5), 140.0 * 7.5 / 8.5,
+       "horizontal line filter excluded the zero-filled vertical response");
+  require(horizontal.valid[0] == 0, "horizontal filtering made a missing return valid");
 }
 
 void verticalBoundariesDoNotWrap() {

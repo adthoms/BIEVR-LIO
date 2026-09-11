@@ -53,41 +53,34 @@ void validate(const IntensityConfig& config) {
   }
 }
 
-// A missing return must not manufacture a line artifact. Apply the correction
-// only where the separable filter's complete support has been observed.
+// Match COIN-LIO's separable line filter on a zero-filled intensity image.
+// Missing-return validity remains independent of the filtered response.
 std::vector<double> lineCorrection(const std::vector<double>& image,
-                                   const std::vector<size_t>& counts,
                                    const IntensityConfig& config) {
   const int width = config.width;
   const int height = config.height;
   std::vector<double> vertical(image.size(), 0.0);
-  std::vector<uint8_t> valid(image.size(), 0);
   const int ry = static_cast<int>(config.highpass.size() / 2);
   const int rx = static_cast<int>(config.lowpass.size() / 2);
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       const size_t index = static_cast<size_t>(y) * width + x;
-      bool observed = true;
       for (int k = -ry; k <= ry; ++k) {
         const size_t neighbor = static_cast<size_t>(reflect(y + k, height)) * width + x;
-        observed = observed && counts[neighbor] != 0;
         vertical[index] += config.highpass[k + ry] * image[neighbor];
       }
-      valid[index] = observed && std::isfinite(vertical[index]);
     }
   }
   std::vector<double> correction(image.size(), 0.0);
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
       const size_t index = static_cast<size_t>(y) * width + x;
-      bool observed = true;
       double filtered = 0.0;
       for (int k = -rx; k <= rx; ++k) {
         const size_t neighbor = static_cast<size_t>(y) * width + wrap(x + k, width);
-        observed = observed && valid[neighbor];
         filtered += config.lowpass[k + rx] * vertical[neighbor];
       }
-      if (observed && std::isfinite(filtered)) correction[index] = filtered;
+      if (std::isfinite(filtered)) correction[index] = filtered;
     }
   }
   return correction;
@@ -216,7 +209,7 @@ IntensityFrame normalizeIntensity(const StampedIntensityPointcloud& cloud,
   }
 
   if (config.line_removal) {
-    const auto correction = lineCorrection(image, counts, config);
+    const auto correction = lineCorrection(image, config);
     for (size_t pixel = 0; pixel < pixels; ++pixel) {
       if (counts[pixel]) image[pixel] = std::max(0.0, image[pixel] - correction[pixel]);
     }
