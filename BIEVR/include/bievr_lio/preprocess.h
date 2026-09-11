@@ -1,6 +1,8 @@
 #ifndef BIEVR_LIO_PREPROCESS_H_
 #define BIEVR_LIO_PREPROCESS_H_
 
+#include <numeric>
+
 #include "bievr_lio/bievr_map.h"
 #include "bievr_lio/common.h"
 
@@ -14,11 +16,23 @@ struct PreprocessConfig {
   double downsample_resolution = 0.1;  // meters
 };
 
-void voxelDownsample(const Pointcloud& points_raw, Pointcloud& points_down, double voxel_size);
+void voxelDownsample(const Pointcloud& points_raw, Pointcloud& points_down, double voxel_size,
+                     std::vector<size_t>* output_indices = nullptr);
 
 void sampleInformed(const BIEVRMap& map, const Transform& T_W_L, const Pointcloud& points_raw,
                     Pointcloud& points_coarse, Pointcloud& points_fine, double voxel_size,
-                    size_t n_samples);
+                    size_t n_samples, std::vector<size_t>* coarse_indices = nullptr,
+                    std::vector<size_t>* fine_indices = nullptr);
+
+struct IntensitySamples {
+  std::vector<size_t> indices;
+  size_t num_voxels = 0;
+};
+
+IntensitySamples sampleIntensity(const BIEVRMap& map, const Transform& T_W_L,
+                                 const Pointcloud& points_raw,
+                                 const std::vector<uint8_t>& valid, size_t max_voxels = 100,
+                                 double resolution = 0.1);
 
 template <typename T>
 concept HasStamp = requires(T t) {
@@ -29,12 +43,17 @@ concept HasStamp = requires(T t) {
 template <typename PointcloudT>
 void filterMinMaxRange(const PointcloudT& points_raw, PointcloudT& points_filtered,
                        const double min_range = 0.0,
-                       const double max_range = std::numeric_limits<double>::max()) {
+                       const double max_range = std::numeric_limits<double>::max(),
+                       std::vector<size_t>* output_indices = nullptr) {
   bool filter_min = (min_range > 0.0);
   bool filter_max = (max_range < std::numeric_limits<double>::max());
 
   if (!filter_min && !filter_max) {
     points_filtered = points_raw;
+    if (output_indices) {
+      output_indices->resize(points_raw.size());
+      std::iota(output_indices->begin(), output_indices->end(), 0);
+    }
     return;
   }
 
@@ -68,6 +87,7 @@ void filterMinMaxRange(const PointcloudT& points_raw, PointcloudT& points_filter
   }
 
   points_filtered.resize(selected_indices.size());
+  if (output_indices) *output_indices = selected_indices;
   tbb::parallel_for(tbb::blocked_range<size_t>(0, selected_indices.size()),
                     [&](const tbb::blocked_range<size_t>& r) {
                       for (size_t i = r.begin(); i != r.end(); ++i) {

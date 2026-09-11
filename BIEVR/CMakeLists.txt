@@ -76,7 +76,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-  foreach(test_name intensity_processing intensity_map)
+  foreach(test_name intensity_processing intensity_map intensity_sampling intensity_registration)
     add_executable(test_${test_name} tests/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} PRIVATE ${PROJECT_NAME})
     target_compile_features(test_${test_name} PRIVATE cxx_std_20)

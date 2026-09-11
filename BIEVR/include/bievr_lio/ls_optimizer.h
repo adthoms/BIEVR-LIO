@@ -22,9 +22,48 @@ struct RegistrationConfig {
   bool lm_debug_print = false;
   bool img_residual = true;
   bool img_jacobian = true;
+  double photo_scale = 0.003;
 };
 
+// Differentiate the masked, normalized bilinear interpolant itself. In particular,
+// holes change both the numerator and denominator; central differences do not
+// describe the residual evaluated during an LM trial in that case.
+inline bool sampleIntensityAndGradient(const Voxel* voxel, double x, double y,
+                                       double& value, double& dIdx, double& dIdy) {
+  const auto& image = voxel->intensity_smoothed_;
+  const auto& mask = voxel->intensity_weights_;
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 ||
+      x >= image.cols() - 1 || y >= image.rows() - 1 ||
+      mask.rows() != image.rows() || mask.cols() != image.cols()) return false;
+  const int x0 = static_cast<int>(std::floor(x));
+  const int y0 = static_cast<int>(std::floor(y));
+  const double dx = x - x0, dy = y - y0;
+  double numerator = 0, denominator = 0, nx = 0, ny = 0, wx = 0, wy = 0;
+  for (int v = 0; v < 2; ++v) {
+    for (int u = 0; u < 2; ++u) {
+      const double pixel = image(y0 + v, x0 + u);
+      if (!(mask(y0 + v, x0 + u) > 0) || !std::isfinite(pixel)) continue;
+      const double a = u ? dx : 1 - dx, b = v ? dy : 1 - dy;
+      const double weight = a * b;
+      const double gx = (u ? 1 : -1) * b, gy = a * (v ? 1 : -1);
+      numerator += weight * pixel;
+      denominator += weight;
+      nx += gx * pixel;
+      ny += gy * pixel;
+      wx += gx;
+      wy += gy;
+    }
+  }
+  if (!(denominator > 0)) return false;
+  value = numerator / denominator;
+  dIdx = (nx - value * wx) / denominator;
+  dIdy = (ny - value * wy) / denominator;
+  return std::isfinite(value) && std::isfinite(dIdx) && std::isfinite(dIdy);
+}
+
 inline bool getSubPixelValue(const Voxel* voxel, const double x, const double y, double& value) {
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 ||
+      x >= voxel->bump_smoothed_.cols() - 1 || y >= voxel->bump_smoothed_.rows() - 1) return false;
   int x0 = std::floor(x);
   int y0 = std::floor(y);
 
@@ -63,6 +102,8 @@ inline bool getSubPixelValue(const Voxel* voxel, const double x, const double y,
 // Gradients are set to 0 when their 4x2 stencil is out of bounds or has no valid corners.
 inline bool sampleValueAndGradient(const Voxel* voxel, const double x, const double y,
                                    double& value, double& dIdx, double& dIdy) {
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 ||
+      x >= voxel->bump_smoothed_.cols() - 1 || y >= voxel->bump_smoothed_.rows() - 1) return false;
   const int x0 = std::floor(x);
   const int y0 = std::floor(y);
   const int x1 = x0 + 1;
@@ -154,10 +195,20 @@ inline bool sampleValueAndGradient(const Voxel* voxel, const double x, const dou
 
 struct Accumulator {
   int count = 0;
+  int unique_count = 0;
+  int geometry_count = 0;
+  int photo_count = 0;
+  bool support_lost = false;
   double error_sum = 0.0;
   Matrix66 H = Matrix66::Zero();
   Vector6 b = Vector6::Zero();
   double huber_delta = 0.2;  // default delta
+
+  inline double loss(double r) const {
+    const double abs_r = std::abs(r);
+    return abs_r <= huber_delta ? 0.5 * r * r
+                               : huber_delta * (abs_r - 0.5 * huber_delta);
+  }
 
   inline void add(double r, const Row6* J) {
     ++count;
@@ -165,7 +216,7 @@ struct Accumulator {
     bool inlier = abs_r <= huber_delta;
     double w = inlier ? 1.0 : huber_delta / abs_r;
 
-    error_sum += inlier ? 0.5 * r * r : huber_delta * (abs_r - 0.5 * huber_delta);
+    error_sum += loss(r);
 
     if (J) {
       const Vector6 wJ = w * J->transpose();
@@ -176,6 +227,10 @@ struct Accumulator {
 
   inline void merge(const Accumulator& other) {
     count += other.count;
+    unique_count += other.unique_count;
+    geometry_count += other.geometry_count;
+    photo_count += other.photo_count;
+    support_lost |= other.support_lost;
     error_sum += other.error_sum;
     H += other.H;
     b += other.b;
@@ -187,7 +242,9 @@ class LsqRegistration {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   LsqRegistration(const BIEVRMap& map, const Pointcloud& source,
-                  const RegistrationConfig& config = RegistrationConfig());
+                  const RegistrationConfig& config = RegistrationConfig(),
+                  const Intensities* intensities = nullptr,
+                  const std::vector<uint8_t>* photometric_flags = nullptr);
   virtual ~LsqRegistration() = default;
 
   Transform computeTransformation(const Transform& T_W_L_init);
@@ -196,13 +253,17 @@ class LsqRegistration {
   // linearization with Jacobians (i.e. the points that actually constrained the
   // pose). Reported on the dashboard as "Effective Points".
   int numEffectivePoints() const { return num_effective_points_; }
+  int numPhotometricPoints() const { return num_photometric_points_; }
 
  private:
   bool isConverged(const Transform& delta) const;
 
   double linearize(const Transform& T_W_L, Matrix66* H = nullptr, Vector6* b = nullptr);
+  double linearizeGeometry(const Transform& T_W_L, Matrix66* H, Vector6* b);
+  double linearizeJoint(const Transform& T_W_L, Matrix66* H, Vector6* b);
 
   bool stepLm(Transform& x0, Transform& delta);
+  void logJointInformation(const Transform& pose);
 
   RegistrationConfig config_;
   double lm_lambda_ = -1.0;
@@ -211,6 +272,25 @@ class LsqRegistration {
   std::vector<M3> skew_points_j_;
   bool converged_ = false;
   int num_effective_points_ = 0;
+  int num_photometric_points_ = 0;
+  const Intensities* intensities_ = nullptr;
+  const std::vector<uint8_t>* photometric_flags_ = nullptr;
+  bool coin_mode_ = false;
+  bool frozen_joint_support_ = false;
+  int initial_geometry_support_ = 0;
+  int initial_photo_support_ = 0;
+  int current_geometry_support_ = 0;
+  int current_photo_support_ = 0;
+  bool debug_overlap_rejected_ = false;
+  V3 debug_weak_axis_ = V3::Zero();
+  struct Correspondence {
+    const Voxel* voxel = nullptr;
+    bool geometry = false;
+    bool photo = false;
+    double geometry_cost = 0.0;
+    double photo_cost = 0.0;
+  };
+  std::vector<Correspondence> correspondences_;
 };
 
 }  // namespace bievr
